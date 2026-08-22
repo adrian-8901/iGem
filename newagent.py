@@ -3,13 +3,22 @@ import plotly.graph_objects as go
 import trimesh
 from plotly.subplots import make_subplots
 from dash import Dash, dcc, html, Input, Output
+from scipy.ndimage import distance_transform_edt
+from skimage import measure
 
 app = Dash(__name__)
 
 # Load your 3D model (STL, OBJ, PLY, etc.)
 mesh = trimesh.load("./sample_bead.stl")
 
-# Basic sanity checks - dissolution math needs a valid closed shape
+pitch = 0.1
+voxel_grid = mesh.voxelized(pitch).fill()
+solid_mask = voxel_grid.matrix
+voxel_size = pitch
+
+distance_field = distance_transform_edt(solid_mask, sampling=voxel_size)
+
+
 print("Volume:", mesh.volume)
 print("Surface area:", mesh.area)
 if mesh.volume < 0:
@@ -22,14 +31,14 @@ def mesh_mass(volume, density):
     return volume * density
 
 
-def scaled_mesh_area(
-    V_original, A_original, V_new
-):  # TODO: Switch to actual erosion computation model
-    if V_new <= 0:
-        return 0.0
-    s = (V_new / V_original) ** (1 / 3)
-    # Area scales with the square of linear scale factor
-    return A_original * (s**2)
+def mesh_area(verts, faces):
+    area = 0.0
+    for tri in faces:
+        v0 = verts[tri[0]]
+        v1 = verts[tri[1]]
+        v2 = verts[tri[2]]
+        area += 0.5 * np.linalg.norm(np.cross(v1 - v0, v2 - v0))
+    return area
 
 
 app.layout = html.Div(
@@ -57,8 +66,8 @@ def main_loop():
     V0 = volume
     A0 = mesh.area
     M0 = mesh_mass(V0, density)
-    t_max = 60
-    dt = 0.1
+    t_max = 14
+    dt = 0.05
 
     steps = int(t_max / dt)
     t_history, M_history, A_history, N_history = [], [], [], []
@@ -68,10 +77,11 @@ def main_loop():
 
     # Mass vs time
     for step in range(steps + 1):
-        k = 0.05
+        target_t_full = 12.0
+        k = 3 * density * V0 / (A0 * target_t_full)
         t = step * dt
         density_bacteria = 1e6  # CFU released per mg hydrogel dissolved #TODO
-        r_growth = 0.3 / 3600  # bacterial growth rate (per hour, placeholder) #TODO
+        r_growth = 0.3  # bacterial growth rate (per hour, placeholder) #TODO
         K_capacity = 1e9  # carrying capacity (CFU), placeholder #TODO
         V_current = M / density
         A_current = scaled_mesh_area(V0, A0, V_current)
@@ -131,9 +141,9 @@ def main_loop():
     )
 
     fig.update_yaxes(row=1, col=1, title_text="Remaining Pill Mass (mg)")
-    fig.update_xaxes(row=1, col=1, title_text="Time (s)")
+    fig.update_xaxes(row=1, col=1, title_text="Time (h)")
     fig.update_yaxes(row=1, col=2, title_text="CFU Released")
-    fig.update_xaxes(row=1, col=2, title_text="Time (s)")
+    fig.update_xaxes(row=1, col=2, title_text="Time (h)")
 
     return fig
 
