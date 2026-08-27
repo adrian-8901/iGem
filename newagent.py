@@ -45,6 +45,22 @@ def mass_and_area_at_depth(distance_fld, erosion_depth, v_size, dens):
     return mesh_mass(vol, dens), mesh_area(verts, faces)
 
 
+# Physiological GI Transit pH profile
+def get_ph(t):
+    if t < 2.0:
+        return 1.8  # Gastric fluid
+    elif t < 6.0:
+        return 6.8  # Small intestinal fluid
+    else:
+        return 6.2  # Colonic fluid
+
+
+# pH-dependent scaling multiplier for erosion rate k
+def get_ph_multiplier(ph, ph_crit=5.0):
+    # Sigmoidal response mimicking carboxylic deprotonation / enteric dissolution
+    return 1.0 / (1.0 + np.exp(-2.5 * (ph - ph_crit)))
+
+
 # Dash App Initialization
 app = Dash(__name__)
 
@@ -58,14 +74,13 @@ app.layout = html.Div(
     },
     children=[
         html.H1(
-            "Simulation",
+            "Erosion Simulation",
             style={
                 "textAlign": "center",
                 "marginBottom": "20px",
                 "color": "#ffffff",
             },
         ),
-        # Mandatory Drag and Drop Area
         dcc.Upload(
             id="upload-stl",
             children=html.Div(
@@ -93,18 +108,26 @@ app.layout = html.Div(
             },
             multiple=False,
         ),
-        html.Div(
-            id="metrics-display",
-            style={
-                "display": "flex",
-                "justifyContent": "space-around",
-                "marginBottom": "25px",
-                "backgroundColor": "#111111",
-                "padding": "15px",
-                "borderRadius": "8px",
-            },
+        dcc.Loading(
+            id="loading-indicator",
+            type="circle",
+            color="#00ccff",
+            style={"marginTop": "30px"},
+            children=[
+                html.Div(
+                    id="metrics-display",
+                    style={
+                        "display": "flex",
+                        "justifyContent": "space-around",
+                        "marginBottom": "25px",
+                        "backgroundColor": "#111111",
+                        "padding": "15px",
+                        "borderRadius": "8px",
+                    },
+                ),
+                html.Div([dcc.Graph(id="simulation-graphs")]),
+            ],
         ),
-        html.Div([dcc.Graph(id="simulation-graphs")]),
     ],
 )
 
@@ -115,7 +138,6 @@ app.layout = html.Div(
     prevent_initial_call=False,
 )
 def run_simulation(contents):
-    # Prompt state when no file is uploaded yet
     if contents is None:
         fig = go.Figure()
         fig.update_layout(
@@ -220,7 +242,7 @@ def run_simulation(contents):
         print(f"Error processing file: {e}")
         return go.Figure(), []
 
-    # Simulation Logic
+    # Simulation Setup
     v0 = volume
     a0 = mesh.area
     m0 = m_of_depth(0)
@@ -230,38 +252,48 @@ def run_simulation(contents):
     steps = int(t_max / dt)
 
     target_t_full = 12.0
-    k = 3 * density * v0 / (a0 * target_t_full)
-
+    k_base = 3 * density * v0 / (a0 * target_t_full)
     t_colon = 6.0
-    req_wall_thickness_mm = (k / density) * t_colon
+
+    # Calculate dynamic integrated minimum wall thickness for pre-colon transit (0h to 6h)
+    req_wall_thickness_mm = 0.0
+    for step in range(int(t_colon / dt)):
+        t_curr = step * dt
+        ph_curr = get_ph(t_curr)
+        k_curr = k_base * get_ph_multiplier(ph_curr)
+        req_wall_thickness_mm += (k_curr / density) * dt
+
     req_wall_thickness_um = req_wall_thickness_mm * 1000.0
 
     density_bacteria = 1e6
     r_growth = 0.3
     k_capacity = 1e9
 
-    t_history, percentage_history, n_history = [], [], []
+    t_history, percentage_history, n_history, ph_history = [], [], [], []
     percentage_history_wall, n_history_wall = [], []
 
     n = 0.0
     n_wall = 0.0
-    depth = 0.0
+    depth_no_wall = 0.0
+    depth_with_wall = 0.0
 
     m_at_t6 = m0
     n_at_t6 = 0.0
 
     for step in range(steps + 1):
         t = step * dt
+        ph = get_ph(t)
+        k_t = k_base * get_ph_multiplier(ph)
 
-        # Without Wall
-        m = m_of_depth(depth)
-        a_current = a_of_depth(depth)
+        # --- WITHOUT WALL ---
+        m = m_of_depth(depth_no_wall)
+        a_current = a_of_depth(depth_no_wall)
 
         if abs(t - t_colon) < (dt / 2.0):
             m_at_t6 = m
             n_at_t6 = n
 
-        dm_dt = -k * a_current if m > 0 else 0.0
+        dm_dt = -k_t * a_current if m > 0 else 0.0
         release_rate = density_bacteria * max(0.0, -dm_dt)
         dn_dt = release_rate + r_growth * n * (1.0 - n / k_capacity)
         n = max(0.0, n + dn_dt * dt)
@@ -269,14 +301,17 @@ def run_simulation(contents):
         t_history.append(t)
         n_history.append(n)
         percentage_history.append(((m0 - m) / m0) * 100 if m0 > 0 else 0.0)
+        ph_history.append(ph)
 
-        # With Wall
-        d_core = max(0.0, depth - req_wall_thickness_mm)
+        # --- WITH WALL ---
+        d_core = max(0.0, depth_with_wall - req_wall_thickness_mm)
         m_wall = m_of_depth(d_core)
         a_wall = a_of_depth(d_core)
 
         dm_dt_wall = (
-            -k * a_wall if (m_wall > 0 and depth >= req_wall_thickness_mm) else 0.0
+            -k_t * a_wall
+            if (m_wall > 0 and depth_with_wall >= req_wall_thickness_mm)
+            else 0.0
         )
         release_rate_wall = density_bacteria * max(0.0, -dm_dt_wall)
         dn_dt_wall = release_rate_wall + r_growth * n_wall * (1.0 - n_wall / k_capacity)
@@ -285,7 +320,9 @@ def run_simulation(contents):
         percentage_history_wall.append(((m0 - m_wall) / m0) * 100 if m0 > 0 else 0.0)
         n_history_wall.append(n_wall)
 
-        depth += (k / density) * dt
+        # Advance erosion depth dynamically based on local pH
+        depth_no_wall += (k_t / density) * dt
+        depth_with_wall += (k_t / density) * dt
 
     premature_loss_pct = ((m0 - m_at_t6) / m0) * 100 if m0 > 0 else 0.0
     colon_delivered_cfu = n - n_at_t6
