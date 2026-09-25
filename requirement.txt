@@ -1,0 +1,17 @@
+# Core Scientific and Mathematical Libraries
+numpy>=1.21.0
+scipy>=1.7.0
+
+# Geometric Processing and Mesh Handling
+trimesh>=0.10.0
+scikit-image>=0.19.0
+
+# Visualization Library (Plotly)
+plotly>=5.0.0
+
+# Scientific Image Processing (Distance Transforms)
+# This is typically part of scipy, but it's good practice to list it if versioning is strict
+scipy>=1.7.0
+
+# Web Application Framework
+dash>=2.0.0
