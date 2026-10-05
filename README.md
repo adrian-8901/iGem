@@ -9,9 +9,13 @@
 
 # Setup 
 1. Clone this repository
-`git clone https://github.com/adrian-8901/iGem \n
-cd iGem`
+```bash
+git clone https://github.com/adrian-8901/iGem
+cd iGem
+```
 2. Install dependencies and run the script
-`pip install -r requirement.txt \n
-py newagent.py`
+```bash
+pip install -r requirement.txt
+py newagent.py
+```
 3. Open the generated localhost link to access webpage interface
