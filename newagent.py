@@ -215,7 +215,7 @@ def run_simulation(contents):
 
         volume = abs(mesh.volume)
         voxel_grid = mesh.voxelized(pitch).fill()
-        solid_mask = voxel_grid.matrix
+        solid_mask = np.pad(voxel_grid.matrix, pad_width=1, mode="constant", constant_values=False)
         distance_field = distance_transform_edt(solid_mask, sampling=voxel_size)
 
         max_depth = distance_field.max() * 1.05
