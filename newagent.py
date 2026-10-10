@@ -45,6 +45,38 @@ def mass_and_area_at_depth(distance_fld, erosion_depth, v_size, dens):
     return mesh_mass(vol, dens), mesh_area(verts, faces)
 
 
+def zero_order_delivery_score(
+    t, release_pct, t_colon=6.0, t_end=14.0, premature_power=1.0
+):
+    """Colon delivery score that rewards zero-order (constant-rate) release in the colon window.
+
+    score = protection * completeness * linearity
+      protection   : (1 - F(t_colon)) ** premature_power. 1 = nothing released before the colon;
+                     raise premature_power above 1 to punish early leakage harder.
+      completeness : share of the payload still present at t_colon that has been released by t_end.
+      linearity    : 1 - 2 * mean|G(t) - ideal(t)| over [t_colon, t_end], where G is the
+                     within-window release normalised to 0..1 and ideal is a straight line from
+                     0 at t_colon to 1 at t_end. 1 = constant release rate across the whole window,
+                     0 = all-at-once burst.
+    With premature_power = 1, protection * completeness is the fraction of the total payload
+    released inside the colon window.
+    Returns (score, protection, completeness, linearity), each in [0, 1].
+    """
+    t = np.asarray(t, dtype=float)
+    frac = np.clip(np.asarray(release_pct, dtype=float) / 100.0, 0.0, 1.0)
+    f_start = np.interp(t_colon, t, frac)
+    f_end = np.interp(t_end, t, frac)
+    if f_start >= 1.0 - 1e-9 or f_end - f_start < 1e-6:
+        return 0.0, (1.0 - f_start) ** premature_power, 0.0, 0.0
+    protection = (1.0 - f_start) ** premature_power
+    completeness = (f_end - f_start) / (1.0 - f_start)
+    in_window = (t >= t_colon) & (t <= t_end)
+    g = np.clip((frac[in_window] - f_start) / (f_end - f_start), 0.0, 1.0)
+    ideal = (t[in_window] - t_colon) / (t_end - t_colon)
+    linearity = float(np.clip(1.0 - 2.0 * np.mean(np.abs(g - ideal)), 0.0, 1.0))
+    return protection * completeness * linearity, protection, completeness, linearity
+
+
 # Physiological GI Transit pH profile
 def get_ph(t):
     if t < 2.0:
@@ -183,15 +215,7 @@ def run_simulation(contents):
                     html.H2("-- %", style={"margin": "0"}),
                 ]
             ),
-            html.Div(
-                [
-                    html.H4(
-                        "Colon Released CFU",
-                        style={"margin": "0 0 5px 0", "color": "#aaa"},
-                    ),
-                    html.H2("-- CFU", style={"margin": "0"}),
-                ]
-            ),
+
             html.Div(
                 [
                     html.H4(
@@ -215,11 +239,13 @@ def run_simulation(contents):
 
         volume = abs(mesh.volume)
         voxel_grid = mesh.voxelized(pitch).fill()
-        solid_mask = np.pad(voxel_grid.matrix, pad_width=1, mode="constant", constant_values=False)
+        solid_mask = np.pad(
+            voxel_grid.matrix, pad_width=1, mode="constant", constant_values=False
+        )
         distance_field = distance_transform_edt(solid_mask, sampling=voxel_size)
 
         max_depth = distance_field.max() * 1.05
-        d_samples = np.linspace(0, max_depth, 200)
+        d_samples = np.linspace(1e-6, max_depth, 200)
 
         with ProcessPoolExecutor() as executor:
             results = list(
@@ -243,9 +269,16 @@ def run_simulation(contents):
         return go.Figure(), []
 
     # Simulation Setup
-    v0 = volume
-    a0 = mesh.area
     m0 = m_of_depth(0)
+    v0 = m0 / density  # (mm^3)
+    a0 = a_of_depth(0)  # (mm^2)
+
+    print(
+        f"Volume: mesh {volume:.3f} vs voxel {v0:.3f} mm^3 ({100*(v0/volume-1):+.2f}%)"
+    )
+    print(
+        f"Area:   mesh {mesh.area:.3f} vs voxel {a0:.3f} mm^2 ({100*(a0/mesh.area-1):+.2f}%)"
+    )
 
     t_max = 14.0
     dt = 0.1
@@ -326,8 +359,14 @@ def run_simulation(contents):
 
     premature_loss_pct = ((m0 - m_at_t6) / m0) * 100 if m0 > 0 else 0.0
     colon_delivered_cfu = n - n_at_t6
-    colon_delivery_score = max(0.0, (100.0 - premature_loss_pct) / 100.0) * (
-        colon_delivered_cfu / k_capacity
+
+    # Zero-order colon delivery score, computed from the mass-release curves
+    t_arr = np.array(t_history)
+    score_nw, _, _, _ = zero_order_delivery_score(
+        t_arr, percentage_history, t_colon, t_max
+    )
+    colon_delivery_score, protection_w, completeness_w, linearity_w = (
+        zero_order_delivery_score(t_arr, percentage_history_wall, t_colon, t_max)
     )
 
     metrics_html = [
@@ -375,6 +414,10 @@ def run_simulation(contents):
                 html.H2(
                     f"{colon_delivery_score:.4f}",
                     style={"margin": "0", "color": "#00ccff"},
+                ),
+                html.Div(
+                    f"with wall | completeness {completeness_w:.0%} x linearity {linearity_w:.2f} | no wall {score_nw:.3f}",
+                    style={"fontSize": "12px", "color": "#888", "marginTop": "4px"},
                 ),
             ]
         ),
